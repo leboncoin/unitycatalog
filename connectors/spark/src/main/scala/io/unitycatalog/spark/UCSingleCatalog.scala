@@ -3,6 +3,7 @@ package io.unitycatalog.spark
 import io.unitycatalog.client.{ApiClient, ApiException}
 import io.unitycatalog.client.api.{SchemasApi, TablesApi, TemporaryCredentialsApi}
 import io.unitycatalog.client.model.{ColumnInfo, ColumnTypeName, CreateSchema, CreateTable, DataSourceFormat, GenerateTemporaryPathCredential, GenerateTemporaryTableCredential, ListTablesResponse, PathOperation, SchemaInfo, TableOperation, TableType, TemporaryCredentials}
+import io.unitycatalog.spark.auth.catalog.UCTokenProvider
 
 import java.net.URI
 import java.util
@@ -28,6 +29,7 @@ class UCSingleCatalog extends TableCatalog with SupportsNamespaces with Logging 
 
   private[this] var apiClient: ApiClient = null;
   private[this] var temporaryCredentialsApi: TemporaryCredentialsApi = null
+  private[this] var skipCredentialVending: Boolean = false
 
   @volatile private var delegate: TableCatalog = null
 
@@ -41,14 +43,36 @@ class UCSingleCatalog extends TableCatalog with SupportsNamespaces with Logging 
       .setHost(url.getHost)
       .setPort(url.getPort)
       .setScheme(url.getScheme)
-    val token = options.get("token")
-    if (token != null && token.nonEmpty) {
+    // Backport (0.3.x formalism): resolve auth from options. Supports a static `token`
+    // or the OAuth 2.0 client-credentials keys `oauth.uri`/`oauth.clientId`/`oauth.clientSecret`
+    // (machine-to-machine). The interceptor is dynamic: `accessToken()` is called on every
+    // request, so `OAuthUCTokenProvider` refreshes the token transparently for long sessions.
+    val hasAuthConfig = options.get(UCTokenProvider.TOKEN) != null ||
+      options.get(UCTokenProvider.OAUTH_URI) != null ||
+      options.get(UCTokenProvider.OAUTH_CLIENT_ID) != null ||
+      options.get(UCTokenProvider.OAUTH_CLIENT_SECRET) != null
+    if (hasAuthConfig) {
+      // `options` is a CaseInsensitiveStringMap (keys lowercased), so read each key via `get`
+      // and rebuild a map with the exact keys the factory expects (e.g. `oauth.clientId`).
+      val authOptions = new util.HashMap[String, String]
+      Seq(UCTokenProvider.TOKEN, UCTokenProvider.OAUTH_URI, UCTokenProvider.OAUTH_CLIENT_ID,
+        UCTokenProvider.OAUTH_CLIENT_SECRET).foreach { key =>
+        val value = options.get(key)
+        if (value != null) authOptions.put(key, value)
+      }
+      val tokenProvider = UCTokenProvider.create(authOptions, "")
       apiClient = apiClient.setRequestInterceptor { request =>
-        request.header("Authorization", "Bearer " + token)
+        request.header("Authorization", "Bearer " + tokenProvider.accessToken())
       }
     }
     temporaryCredentialsApi = new TemporaryCredentialsApi(apiClient)
-    val proxy = new UCProxy(apiClient, temporaryCredentialsApi)
+    // Opt-out of UC credential vending: when enabled, the connector does not request temporary
+    // storage credentials and injects none, so Spark falls back to the ambient storage credential
+    // chain (e.g. AWS IAM instance profile / default provider chain). Useful against metastores
+    // where external credential vending is disabled but the caller already has direct storage access.
+    skipCredentialVending = java.lang.Boolean.parseBoolean(
+      options.getOrDefault("skipCredentialVending", "false"))
+    val proxy = new UCProxy(apiClient, temporaryCredentialsApi, skipCredentialVending)
     proxy.initialize(name, options)
     if (UCSingleCatalog.LOAD_DELTA_CATALOG.get()) {
       try {
@@ -102,19 +126,22 @@ class UCSingleCatalog extends TableCatalog with SupportsNamespaces with Logging 
     } else if (hasLocationClause) {
       val location = properties.get(TableCatalog.PROP_LOCATION)
       assert(location != null)
-      val cred = temporaryCredentialsApi.generateTemporaryPathCredentials(
-        new GenerateTemporaryPathCredential().url(location).operation(PathOperation.PATH_CREATE_TABLE))
       val newProps = new util.HashMap[String, String]
       newProps.putAll(properties)
-      val credentialProps = UCSingleCatalog.generateCredentialProps(
-        CatalogUtils.stringToURI(location).getScheme, cred)
-      newProps.putAll(credentialProps.asJava)
-      // TODO: Delta requires the options to be set twice in the properties, with and without the
-      //       `option.` prefix. We should revisit this in Delta.
-      val prefix = TableCatalog.OPTION_PREFIX
-      newProps.putAll(credentialProps.map {
-        case (k, v) => (prefix + k, v)
-      }.asJava)
+      // Skip path-credential vending when opted out; Spark uses the ambient storage credentials.
+      if (!skipCredentialVending) {
+        val cred = temporaryCredentialsApi.generateTemporaryPathCredentials(
+          new GenerateTemporaryPathCredential().url(location).operation(PathOperation.PATH_CREATE_TABLE))
+        val credentialProps = UCSingleCatalog.generateCredentialProps(
+          CatalogUtils.stringToURI(location).getScheme, cred)
+        newProps.putAll(credentialProps.asJava)
+        // TODO: Delta requires the options to be set twice in the properties, with and without the
+        //       `option.` prefix. We should revisit this in Delta.
+        val prefix = TableCatalog.OPTION_PREFIX
+        newProps.putAll(credentialProps.map {
+          case (k, v) => (prefix + k, v)
+        }.asJava)
+      }
       delegate.createTable(ident, columns, partitions, newProps)
     } else {
       // TODO: for path-based tables, Spark should generate a location property using the qualified
@@ -204,7 +231,8 @@ object UCSingleCatalog {
 // An internal proxy to talk to the UC client.
 private class UCProxy(
     apiClient: ApiClient,
-    temporaryCredentialsApi: TemporaryCredentialsApi) extends TableCatalog with SupportsNamespaces {
+    temporaryCredentialsApi: TemporaryCredentialsApi,
+    skipCredentialVending: Boolean) extends TableCatalog with SupportsNamespaces {
   private[this] var name: String = null
   private[this] var tablesApi: TablesApi = null
   private[this] var schemasApi: SchemasApi = null
@@ -250,25 +278,30 @@ private class UCProxy(
     }.toArray
     val uri = CatalogUtils.stringToURI(t.getStorageLocation)
     val tableId = t.getTableId
-    val temporaryCredentials = {
-      try {
-        temporaryCredentialsApi
-          .generateTemporaryTableCredentials(
-            // TODO: at this time, we don't know if the table will be read or written. For now we always
-            //       request READ_WRITE credentials as the server doesn't distinguish between READ and
-            //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
-            //       for read or write, we can request the proper credential after fixing Spark.
-            new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ_WRITE)
-          )
-      } catch {
-        case e: ApiException => temporaryCredentialsApi
-          .generateTemporaryTableCredentials(
-            new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ)
-          )
+    // When credential vending is skipped, do not call the UC credentials API and inject no storage
+    // credentials; Spark then uses the ambient storage credential chain (e.g. AWS IAM).
+    val extraSerdeProps: Map[String, String] = if (skipCredentialVending) {
+      Map.empty
+    } else {
+      val temporaryCredentials = {
+        try {
+          temporaryCredentialsApi
+            .generateTemporaryTableCredentials(
+              // TODO: at this time, we don't know if the table will be read or written. For now we always
+              //       request READ_WRITE credentials as the server doesn't distinguish between READ and
+              //       READ_WRITE credentials as of today. When loading a table, Spark should tell if it's
+              //       for read or write, we can request the proper credential after fixing Spark.
+              new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ_WRITE)
+            )
+        } catch {
+          case e: ApiException => temporaryCredentialsApi
+            .generateTemporaryTableCredentials(
+              new GenerateTemporaryTableCredential().tableId(tableId).operation(TableOperation.READ)
+            )
+        }
       }
+      UCSingleCatalog.generateCredentialProps(uri.getScheme, temporaryCredentials)
     }
-    val extraSerdeProps = UCSingleCatalog.generateCredentialProps(
-      uri.getScheme, temporaryCredentials)
     val sparkTable = CatalogTable(
       identifier,
       tableType = if (t.getTableType == TableType.MANAGED) {
