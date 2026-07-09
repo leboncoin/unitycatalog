@@ -1,0 +1,4 @@
+# Pin the JDK for this repo: the build (README + CI) requires Temurin JDK 17.
+# JDK 21 breaks the Scala 2.12 compiler-bridge build used by the spark/client modules.
+[tools]
+java = "temurin-17"
