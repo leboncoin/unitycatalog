@@ -35,6 +35,57 @@ public class UCTokenProviderTest {
   }
 
   @Test
+  public void createReturnsFileOidcProviderWhenAllOidcKeysAreSet() {
+    Map<String, String> options = new HashMap<>();
+    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
+    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
+    options.put(UCTokenProvider.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token");
+
+    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+
+    assertThat(provider).isInstanceOf(FileOidcUCTokenProvider.class);
+  }
+
+  @Test
+  public void fixedProviderTakesPrecedenceOverOidc() {
+    Map<String, String> options = new HashMap<>();
+    options.put(UCTokenProvider.TOKEN, "static-token");
+    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
+    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
+    options.put(UCTokenProvider.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token");
+
+    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+
+    assertThat(provider).isInstanceOf(FixedUCTokenProvider.class);
+  }
+
+  @Test
+  public void oidcTakesPrecedenceOverOAuth() {
+    Map<String, String> options = new HashMap<>();
+    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
+    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
+    options.put(UCTokenProvider.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token");
+    options.put(UCTokenProvider.OAUTH_URI, "https://example.com/oidc/v1/token");
+    options.put(UCTokenProvider.OAUTH_CLIENT_ID, "client-id");
+    options.put(UCTokenProvider.OAUTH_CLIENT_SECRET, "client-secret");
+
+    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+
+    assertThat(provider).isInstanceOf(FileOidcUCTokenProvider.class);
+  }
+
+  @Test
+  public void createFailsOnIncompleteOidcConfig() {
+    Map<String, String> options = new HashMap<>();
+    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
+    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
+
+    assertThatThrownBy(() -> UCTokenProvider.create(options, PREFIX))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Incomplete OIDC configuration");
+  }
+
+  @Test
   public void fixedProviderTakesPrecedenceOverOAuth() {
     Map<String, String> options = new HashMap<>();
     options.put(UCTokenProvider.TOKEN, "static-token");
