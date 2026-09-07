@@ -25,7 +25,7 @@ public class AuthConfigUtils {
       if (e.getKey().startsWith(AUTH_PREFIX)) {
         // Remove the 'auth.' prefix from the key and add the normalized key-value pair.
         String newKey = e.getKey().substring(AUTH_PREFIX.length()).trim();
-        if (!newKey.isEmpty()) {
+        if (!newKey.isEmpty() && isSet(e.getValue())) {
           newConfigs.put(newKey, e.getValue());
         }
       }
@@ -34,7 +34,7 @@ public class AuthConfigUtils {
     // Unity Catalog versions 0.3.0 and earlier did not use the 'auth.token' key. To maintain
     // backward compatibility, we also copy the legacy 'token' key directly into the new config map.
     String token = configs.get(AuthConfigs.STATIC_TOKEN);
-    if (token != null) {
+    if (isSet(token)) {
       Preconditions.checkArgument(
           !newConfigs.containsKey(AuthConfigs.STATIC_TOKEN),
           "Static token was configured twice, choose only one: 'token' (legacy) or 'auth.token' (new-style).");
@@ -71,7 +71,7 @@ public class AuthConfigUtils {
       String... keys) {
     boolean anyLegacy = false;
     for (String key : keys) {
-      if (configs.get(key) != null) {
+      if (isSet(configs.get(key))) {
         anyLegacy = true;
         break;
       }
@@ -82,7 +82,7 @@ public class AuthConfigUtils {
 
     for (String key : keys) {
       String value = configs.get(key);
-      if (value == null) {
+      if (!isSet(value)) {
         continue;
       }
       Preconditions.checkArgument(
@@ -97,5 +97,14 @@ public class AuthConfigUtils {
     if (!newConfigs.containsKey(AuthConfigs.TYPE)) {
       newConfigs.put(AuthConfigs.TYPE, typeValue);
     }
+  }
+
+  /**
+   * An empty value counts as unset. Spark hands over the keys a session declared even when their
+   * value is blank, and a blank credential must leave the catalog unauthenticated rather than
+   * select a provider that then rejects it.
+   */
+  private static boolean isSet(String value) {
+    return value != null && !value.trim().isEmpty();
   }
 }

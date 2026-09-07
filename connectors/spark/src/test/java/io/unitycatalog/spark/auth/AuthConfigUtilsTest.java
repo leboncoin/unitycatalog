@@ -128,4 +128,38 @@ public class AuthConfigUtilsTest {
     // Spark lowercases catalog option keys, so the returned map must not be case-sensitive.
     assertThat(configs.get(AuthConfigs.OIDC_CLIENT_ID)).isEqualTo("client-id");
   }
+
+  @Test
+  public void treatsAnEmptyValueAsUnset() {
+    Map<String, String> options = new HashMap<>();
+    // Spark hands over a declared key even when its value is blank, e.g. an unauthenticated local
+    // metastore. That must leave the catalog unauthenticated, not select a provider.
+    options.put(AuthConfigs.STATIC_TOKEN, "");
+
+    Map<String, String> configs = AuthConfigUtils.buildAuthConfigs(options);
+
+    assertThat(configs).doesNotContainKey(AuthConfigs.TYPE);
+  }
+
+  @Test
+  public void treatsAnEmptyPrefixedValueAsUnset() {
+    Map<String, String> options = new HashMap<>();
+    options.put("auth.token", "   ");
+
+    Map<String, String> configs = AuthConfigUtils.buildAuthConfigs(options);
+
+    assertThat(configs).doesNotContainKey(AuthConfigs.TYPE);
+  }
+
+  @Test
+  public void blankLegacyKeysDoNotInferAType() {
+    Map<String, String> options = new HashMap<>();
+    options.put(AuthConfigs.OAUTH_URI, "");
+    options.put(AuthConfigs.OAUTH_CLIENT_ID, "");
+    options.put(AuthConfigs.OAUTH_CLIENT_SECRET, "");
+
+    Map<String, String> configs = AuthConfigUtils.buildAuthConfigs(options);
+
+    assertThat(configs).doesNotContainKey(AuthConfigs.TYPE);
+  }
 }
