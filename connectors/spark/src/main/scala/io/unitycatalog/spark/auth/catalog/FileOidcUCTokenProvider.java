@@ -13,39 +13,44 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.function.Supplier;
 import org.sparkproject.guava.base.Preconditions;
 
 /**
- * Token provider for OIDC workload identity federation: reads an OIDC JWT from a file and
+ * Internal class - not intended for direct use.
+ *
+ * <p>Token provider for OIDC workload identity federation: reads an OIDC token from a file and
  * exchanges it for a Unity Catalog access token (RFC 8693 token exchange). Nothing secret is
  * stored, so there is no client secret to rotate; the caller is identified by its {@code
- * clientId} plus the trust the server places in the token issuer.
+ * oidc.clientId} plus the trust the server places in the token issuer.
  *
  * <p>Intended for Kubernetes workloads, where the file is a projected service account token.
  * Cached and renewed {@link #DEFAULT_LEAD_RENEWAL_TIME_SECONDS} seconds before expiration,
  * thread-safe via double-checked locking, like {@link OAuthUCTokenProvider}.
+ *
+ * <p>lbc addition, with no 0.3.x counterpart yet. It follows the same provider contract, so {@link
+ * #configs()} carries no secret and can safely cross a serialization boundary: only the token file
+ * path travels, and the file itself is read wherever the provider is rebuilt.
  */
-public class FileOidcUCTokenProvider implements UCTokenProvider {
+class FileOidcUCTokenProvider implements UCTokenProvider {
   private static final long DEFAULT_LEAD_RENEWAL_TIME_SECONDS = 30L;
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
   private static final String GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange";
   private static final String SUBJECT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt";
 
-  private final String oidcUri;
-  private final String clientId;
-  private final String tokenFilePath;
-  private final long leadRenewalTimeSeconds;
-  private final HttpClient httpClient;
-  private final Supplier<Instant> clock;
+  private String oidcUri;
+  private String clientId;
+  private String tokenFilePath;
+  private long leadRenewalTimeSeconds;
+  private HttpClient httpClient;
+  private Supplier<Instant> clock;
 
   private volatile TempToken tempToken;
 
-  public FileOidcUCTokenProvider(String oidcUri, String clientId, String tokenFilePath) {
-    this(oidcUri, clientId, tokenFilePath, DEFAULT_LEAD_RENEWAL_TIME_SECONDS,
-        HttpClient.newHttpClient(), Instant::now);
-  }
+  FileOidcUCTokenProvider() {}
 
   // Package-private constructor for testing with custom dependencies.
   FileOidcUCTokenProvider(
@@ -58,8 +63,10 @@ public class FileOidcUCTokenProvider implements UCTokenProvider {
     Preconditions.checkNotNull(oidcUri, "OIDC URI must not be null");
     Preconditions.checkNotNull(clientId, "OIDC client ID must not be null");
     Preconditions.checkNotNull(tokenFilePath, "OIDC token file path must not be null");
-    Preconditions.checkArgument(leadRenewalTimeSeconds >= 0,
-        "Lead renewal time must be non-negative, but got %s", leadRenewalTimeSeconds);
+    Preconditions.checkArgument(
+        leadRenewalTimeSeconds >= 0,
+        "Lead renewal time must be non-negative, but got %s",
+        leadRenewalTimeSeconds);
     Preconditions.checkNotNull(httpClient, "HTTP client must not be null");
     Preconditions.checkNotNull(clock, "Clock must not be null");
 
@@ -69,6 +76,34 @@ public class FileOidcUCTokenProvider implements UCTokenProvider {
     this.leadRenewalTimeSeconds = leadRenewalTimeSeconds;
     this.httpClient = httpClient;
     this.clock = clock;
+  }
+
+  @Override
+  public void initialize(Map<String, String> configs) {
+    String oidcUri = configs.get(AuthConfigs.OIDC_URI);
+    Preconditions.checkArgument(
+        oidcUri != null && !oidcUri.isEmpty(),
+        "Configuration key '%s' is missing or empty",
+        AuthConfigs.OIDC_URI);
+    this.oidcUri = oidcUri;
+
+    String clientId = configs.get(AuthConfigs.OIDC_CLIENT_ID);
+    Preconditions.checkArgument(
+        clientId != null && !clientId.isEmpty(),
+        "Configuration key '%s' is missing or empty",
+        AuthConfigs.OIDC_CLIENT_ID);
+    this.clientId = clientId;
+
+    String tokenFilePath = configs.get(AuthConfigs.OIDC_TOKEN_FILE_PATH);
+    Preconditions.checkArgument(
+        tokenFilePath != null && !tokenFilePath.isEmpty(),
+        "Configuration key '%s' is missing or empty",
+        AuthConfigs.OIDC_TOKEN_FILE_PATH);
+    this.tokenFilePath = tokenFilePath;
+
+    this.leadRenewalTimeSeconds = DEFAULT_LEAD_RENEWAL_TIME_SECONDS;
+    this.httpClient = HttpClient.newHttpClient();
+    this.clock = Instant::now;
   }
 
   @Override
@@ -83,32 +118,49 @@ public class FileOidcUCTokenProvider implements UCTokenProvider {
     return tempToken.token();
   }
 
+  @Override
+  public Map<String, String> configs() {
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.TYPE, AuthConfigs.OIDC_TYPE_VALUE);
+    configs.put(AuthConfigs.OIDC_URI, oidcUri);
+    configs.put(AuthConfigs.OIDC_CLIENT_ID, clientId);
+    configs.put(AuthConfigs.OIDC_TOKEN_FILE_PATH, tokenFilePath);
+    return configs;
+  }
+
   private TempToken renewToken() {
     try {
-      // Re-read on every renewal: kubelet rotates the projected token, so a JWT read once at
-      // construction time would expire mid-session.
+      // Re-read on every renewal: kubelet rotates the projected token, so a token read once at
+      // initialization would expire mid-session.
       String subjectToken = readSubjectToken();
 
-      String formData = "grant_type=" + encode(GRANT_TYPE)
-          + "&subject_token_type=" + encode(SUBJECT_TOKEN_TYPE)
-          + "&subject_token=" + encode(subjectToken)
-          + "&client_id=" + encode(clientId)
-          + "&scope=all-apis";
+      String formData =
+          "grant_type="
+              + encode(GRANT_TYPE)
+              + "&subject_token_type="
+              + encode(SUBJECT_TOKEN_TYPE)
+              + "&subject_token="
+              + encode(subjectToken)
+              + "&client_id="
+              + encode(clientId)
+              + "&scope=all-apis";
 
       // No Authorization header: the subject token is the proof, there is no secret to present.
-      HttpRequest request = HttpRequest.newBuilder()
-          .uri(URI.create(oidcUri))
-          .header("Content-Type", "application/x-www-form-urlencoded")
-          .POST(HttpRequest.BodyPublishers.ofString(formData))
-          .build();
+      HttpRequest request =
+          HttpRequest.newBuilder()
+              .uri(URI.create(oidcUri))
+              .header("Content-Type", "application/x-www-form-urlencoded")
+              .POST(HttpRequest.BodyPublishers.ofString(formData))
+              .build();
 
-      HttpResponse<String> response = httpClient.send(request,
-          HttpResponse.BodyHandlers.ofString());
+      HttpResponse<String> response =
+          httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
       if (response.statusCode() != 200) {
-        throw new IOException(String.format(
-            "Failed to exchange OIDC token. HTTP status: %d, Response: %s",
-            response.statusCode(), response.body()));
+        throw new IOException(
+            String.format(
+                "Failed to exchange OIDC token. HTTP status: %d, Response: %s",
+                response.statusCode(), response.body()));
       }
 
       JsonNode jsonNode = OBJECT_MAPPER.readTree(response.body());
@@ -124,9 +176,10 @@ public class FileOidcUCTokenProvider implements UCTokenProvider {
   private String readSubjectToken() throws IOException {
     Path path = Paths.get(tokenFilePath);
     if (!Files.isRegularFile(path)) {
-      throw new IOException(String.format(
-          "OIDC token file %s does not exist. Expected a projected service account token",
-          tokenFilePath));
+      throw new IOException(
+          String.format(
+              "OIDC token file %s does not exist. Expected a projected service account token",
+              tokenFilePath));
     }
     String token = new String(Files.readAllBytes(path), StandardCharsets.UTF_8).trim();
     if (token.isEmpty()) {

@@ -9,110 +9,136 @@ import org.junit.jupiter.api.Test;
 
 public class UCTokenProviderTest {
 
-  private static final String PREFIX = "spark.sql.catalog.cat.";
-
   @Test
-  public void createReturnsFixedProviderWhenTokenIsSet() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.TOKEN, "static-token");
+  public void createReturnsFixedProviderForStaticType() {
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.TYPE, AuthConfigs.STATIC_TYPE_VALUE);
+    configs.put(AuthConfigs.STATIC_TOKEN, "static-token");
 
-    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+    UCTokenProvider provider = UCTokenProvider.create(configs);
 
     assertThat(provider).isInstanceOf(FixedUCTokenProvider.class);
     assertThat(provider.accessToken()).isEqualTo("static-token");
   }
 
   @Test
-  public void createReturnsOAuthProviderWhenAllOAuthKeysAreSet() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.OAUTH_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OAUTH_CLIENT_ID, "client-id");
-    options.put(UCTokenProvider.OAUTH_CLIENT_SECRET, "client-secret");
+  public void createReturnsOAuthProviderForOAuthType() {
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.TYPE, AuthConfigs.OAUTH_TYPE_VALUE);
+    configs.put(AuthConfigs.OAUTH_URI, "https://example.com/oidc/v1/token");
+    configs.put(AuthConfigs.OAUTH_CLIENT_ID, "client-id");
+    configs.put(AuthConfigs.OAUTH_CLIENT_SECRET, "client-secret");
 
-    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+    UCTokenProvider provider = UCTokenProvider.create(configs);
 
     assertThat(provider).isInstanceOf(OAuthUCTokenProvider.class);
   }
 
   @Test
-  public void createReturnsFileOidcProviderWhenAllOidcKeysAreSet() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
-    options.put(UCTokenProvider.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token");
-
-    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+  public void createReturnsFileOidcProviderForOidcType() {
+    UCTokenProvider provider = UCTokenProvider.create(oidcConfigs());
 
     assertThat(provider).isInstanceOf(FileOidcUCTokenProvider.class);
   }
 
   @Test
-  public void fixedProviderTakesPrecedenceOverOidc() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.TOKEN, "static-token");
-    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
-    options.put(UCTokenProvider.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token");
+  public void createInstantiatesACustomProviderByClassName() {
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.TYPE, CustomTokenProvider.class.getName());
 
-    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+    UCTokenProvider provider = UCTokenProvider.create(configs);
 
-    assertThat(provider).isInstanceOf(FixedUCTokenProvider.class);
+    assertThat(provider).isInstanceOf(CustomTokenProvider.class);
+    assertThat(provider.accessToken()).isEqualTo("custom-token");
   }
 
   @Test
-  public void oidcTakesPrecedenceOverOAuth() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
-    options.put(UCTokenProvider.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token");
-    options.put(UCTokenProvider.OAUTH_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OAUTH_CLIENT_ID, "client-id");
-    options.put(UCTokenProvider.OAUTH_CLIENT_SECRET, "client-secret");
+  public void createFailsWhenTypeIsMissing() {
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.STATIC_TOKEN, "static-token");
 
-    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
+    assertThatThrownBy(() -> UCTokenProvider.create(configs))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Required configuration key 'type' is missing or empty");
+  }
 
-    assertThat(provider).isInstanceOf(FileOidcUCTokenProvider.class);
+  @Test
+  public void createFailsWhenACustomClassCannotBeInstantiated() {
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.TYPE, "com.example.NoSuchProvider");
+
+    assertThatThrownBy(() -> UCTokenProvider.create(configs))
+        .isInstanceOf(RuntimeException.class)
+        .hasMessageContaining("Failed to instantiate custom UCTokenProvider");
   }
 
   @Test
   public void createFailsOnIncompleteOidcConfig() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.OIDC_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OIDC_CLIENT_ID, "client-id");
+    Map<String, String> configs = oidcConfigs();
+    configs.remove(AuthConfigs.OIDC_TOKEN_FILE_PATH);
 
-    assertThatThrownBy(() -> UCTokenProvider.create(options, PREFIX))
+    assertThatThrownBy(() -> UCTokenProvider.create(configs))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Incomplete OIDC configuration");
-  }
-
-  @Test
-  public void fixedProviderTakesPrecedenceOverOAuth() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.TOKEN, "static-token");
-    options.put(UCTokenProvider.OAUTH_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OAUTH_CLIENT_ID, "client-id");
-    options.put(UCTokenProvider.OAUTH_CLIENT_SECRET, "client-secret");
-
-    UCTokenProvider provider = UCTokenProvider.create(options, PREFIX);
-
-    assertThat(provider).isInstanceOf(FixedUCTokenProvider.class);
+        .hasMessageContaining("Configuration key 'oidc.tokenFilePath' is missing or empty");
   }
 
   @Test
   public void createFailsOnIncompleteOAuthConfig() {
-    Map<String, String> options = new HashMap<>();
-    options.put(UCTokenProvider.OAUTH_URI, "https://example.com/oidc/v1/token");
-    options.put(UCTokenProvider.OAUTH_CLIENT_ID, "client-id");
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.TYPE, AuthConfigs.OAUTH_TYPE_VALUE);
+    configs.put(AuthConfigs.OAUTH_URI, "https://example.com/oidc/v1/token");
+    configs.put(AuthConfigs.OAUTH_CLIENT_ID, "client-id");
 
-    assertThatThrownBy(() -> UCTokenProvider.create(options, PREFIX))
+    assertThatThrownBy(() -> UCTokenProvider.create(configs))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Incomplete OAuth configuration");
+        .hasMessageContaining("Configuration key 'oauth.clientSecret' is missing or empty");
   }
 
   @Test
-  public void createFailsWhenNoAuthConfig() {
-    assertThatThrownBy(() -> UCTokenProvider.create(new HashMap<>(), PREFIX))
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("Cannot determine UC authentication configuration");
+  public void configsRoundTripsThroughCreate() {
+    UCTokenProvider provider = UCTokenProvider.create(oidcConfigs());
+
+    // The map a provider hands back must rebuild an equivalent provider: this is what lets the
+    // configuration cross a serialization boundary, e.g. to a Spark executor.
+    UCTokenProvider rebuilt = UCTokenProvider.create(provider.configs());
+
+    assertThat(rebuilt).isInstanceOf(FileOidcUCTokenProvider.class);
+    assertThat(rebuilt.configs()).isEqualTo(provider.configs());
+  }
+
+  @Test
+  public void oidcConfigsCarryNoSecret() {
+    UCTokenProvider provider = UCTokenProvider.create(oidcConfigs());
+
+    assertThat(provider.configs())
+        .containsEntry(AuthConfigs.TYPE, AuthConfigs.OIDC_TYPE_VALUE)
+        .containsEntry(AuthConfigs.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token")
+        .doesNotContainKey(AuthConfigs.OAUTH_CLIENT_SECRET)
+        .doesNotContainKey(AuthConfigs.STATIC_TOKEN);
+  }
+
+  private static Map<String, String> oidcConfigs() {
+    Map<String, String> configs = new HashMap<>();
+    configs.put(AuthConfigs.TYPE, AuthConfigs.OIDC_TYPE_VALUE);
+    configs.put(AuthConfigs.OIDC_URI, "https://example.com/oidc/v1/token");
+    configs.put(AuthConfigs.OIDC_CLIENT_ID, "client-id");
+    configs.put(AuthConfigs.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token");
+    return configs;
+  }
+
+  /** Public so {@code Class.forName(...).getDeclaredConstructor().newInstance()} can reach it. */
+  public static class CustomTokenProvider implements UCTokenProvider {
+    @Override
+    public void initialize(Map<String, String> configs) {}
+
+    @Override
+    public String accessToken() {
+      return "custom-token";
+    }
+
+    @Override
+    public Map<String, String> configs() {
+      return new HashMap<>();
+    }
   }
 }

@@ -3,7 +3,8 @@ package io.unitycatalog.spark
 import io.unitycatalog.client.{ApiClient, ApiException}
 import io.unitycatalog.client.api.{SchemasApi, TablesApi, TemporaryCredentialsApi}
 import io.unitycatalog.client.model.{ColumnInfo, ColumnTypeName, CreateSchema, CreateTable, DataSourceFormat, GenerateTemporaryPathCredential, GenerateTemporaryTableCredential, ListTablesResponse, PathOperation, SchemaInfo, TableOperation, TableType, TemporaryCredentials}
-import io.unitycatalog.spark.auth.catalog.UCTokenProvider
+import io.unitycatalog.spark.auth.AuthConfigUtils
+import io.unitycatalog.spark.auth.catalog.{AuthConfigs, UCTokenProvider}
 
 import java.net.URI
 import java.util
@@ -43,29 +44,13 @@ class UCSingleCatalog extends TableCatalog with SupportsNamespaces with Logging 
       .setHost(url.getHost)
       .setPort(url.getPort)
       .setScheme(url.getScheme)
-    // Backport (0.3.x formalism): resolve auth from options. Supports a static `token`
-    // or the OAuth 2.0 client-credentials keys `oauth.uri`/`oauth.clientId`/`oauth.clientSecret`
-    // (machine-to-machine), or the `oidc.*` keys for workload identity federation (no secret).
-    // The interceptor is dynamic: `accessToken()` is called on every request, so the providers
-    // refresh the token transparently for long sessions.
-    val hasAuthConfig = options.get(UCTokenProvider.TOKEN) != null ||
-      options.get(UCTokenProvider.OAUTH_URI) != null ||
-      options.get(UCTokenProvider.OAUTH_CLIENT_ID) != null ||
-      options.get(UCTokenProvider.OAUTH_CLIENT_SECRET) != null ||
-      options.get(UCTokenProvider.OIDC_URI) != null ||
-      options.get(UCTokenProvider.OIDC_CLIENT_ID) != null ||
-      options.get(UCTokenProvider.OIDC_TOKEN_FILE_PATH) != null
-    if (hasAuthConfig) {
-      // `options` is a CaseInsensitiveStringMap (keys lowercased), so read each key via `get`
-      // and rebuild a map with the exact keys the factory expects (e.g. `oauth.clientId`).
-      val authOptions = new util.HashMap[String, String]
-      Seq(UCTokenProvider.TOKEN, UCTokenProvider.OAUTH_URI, UCTokenProvider.OAUTH_CLIENT_ID,
-        UCTokenProvider.OAUTH_CLIENT_SECRET, UCTokenProvider.OIDC_URI,
-        UCTokenProvider.OIDC_CLIENT_ID, UCTokenProvider.OIDC_TOKEN_FILE_PATH).foreach { key =>
-        val value = options.get(key)
-        if (value != null) authOptions.put(key, value)
-      }
-      val tokenProvider = UCTokenProvider.create(authOptions, "")
+    // Backport (0.3.x formalism): `AuthConfigUtils` normalizes the options into a flat, `type`-keyed
+    // map, accepting both the new `auth.*` keys and the legacy un-prefixed ones this connector
+    // shipped. The interceptor is dynamic: `accessToken()` is called on every request, so the
+    // providers refresh the token transparently for long sessions.
+    val authConfigs = AuthConfigUtils.buildAuthConfigs(options.asCaseSensitiveMap())
+    if (authConfigs.containsKey(AuthConfigs.TYPE)) {
+      val tokenProvider = UCTokenProvider.create(authConfigs)
       apiClient = apiClient.setRequestInterceptor { request =>
         request.header("Authorization", "Bearer " + tokenProvider.accessToken())
       }
