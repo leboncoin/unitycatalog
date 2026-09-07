@@ -17,12 +17,12 @@ import org.sparkproject.guava.base.Preconditions;
  * </ul>
  *
  * <p>Backport of the 0.3.x {@code TokenProvider} to the 0.2.x connector, including the {@code
- * type}-based dispatch and {@link #configs()}. The OAuth implementation relies only on the JDK HTTP
- * client available in 0.2.x, as {@code RetryingApiClient} does not exist here.
+ * type}-based dispatch. The OAuth implementation relies only on the JDK HTTP client available in
+ * 0.2.x, as {@code RetryingApiClient} does not exist here.
  *
- * <p>{@link #configs()} exists so a provider can be rebuilt from a plain string map. That is what
- * lets the configuration cross a serialization boundary, such as reaching a Spark executor through
- * the Hadoop configuration, which is how 0.3.x renews vended credentials off the driver.
+ * <p>The 0.3.x {@code configs()} accessor is deliberately left out: it exists there so an executor
+ * can rebuild a provider from the Hadoop configuration and renew vended credentials, which the
+ * 0.2.x connector never does. Everything here runs on the driver.
  */
 public interface UCTokenProvider {
 
@@ -36,18 +36,6 @@ public interface UCTokenProvider {
 
   /** Returns the access token for Unity Catalog authentication, refreshing it when needed. */
   String accessToken();
-
-  /**
-   * Returns the configuration associated with this token provider.
-   *
-   * <p>The returned map can be passed back to {@link #create(Map)} to obtain an equivalent
-   * provider:
-   *
-   * <pre>{@code
-   * UCTokenProvider newProvider = UCTokenProvider.create(existingProvider.configs());
-   * }</pre>
-   */
-  Map<String, String> configs();
 
   /**
    * Creates a token provider from a configuration map.

@@ -13,7 +13,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.sparkproject.guava.base.Preconditions;
@@ -30,9 +29,8 @@ import org.sparkproject.guava.base.Preconditions;
  * Cached and renewed {@link #DEFAULT_LEAD_RENEWAL_TIME_SECONDS} seconds before expiration,
  * thread-safe via double-checked locking, like {@link OAuthUCTokenProvider}.
  *
- * <p>lbc addition, with no 0.3.x counterpart yet. It follows the same provider contract, so {@link
- * #configs()} carries no secret and can safely cross a serialization boundary: only the token file
- * path travels, and the file itself is read wherever the provider is rebuilt.
+ * <p>lbc addition, with no 0.3.x counterpart yet, so the option naming follows the {@code oauth.*}
+ * block rather than inventing a new shape.
  */
 class FileOidcUCTokenProvider implements UCTokenProvider {
   private static final long DEFAULT_LEAD_RENEWAL_TIME_SECONDS = 30L;
@@ -116,16 +114,6 @@ class FileOidcUCTokenProvider implements UCTokenProvider {
       }
     }
     return tempToken.token();
-  }
-
-  @Override
-  public Map<String, String> configs() {
-    Map<String, String> configs = new HashMap<>();
-    configs.put(AuthConfigs.TYPE, AuthConfigs.OIDC_TYPE_VALUE);
-    configs.put(AuthConfigs.OIDC_URI, oidcUri);
-    configs.put(AuthConfigs.OIDC_CLIENT_ID, clientId);
-    configs.put(AuthConfigs.OIDC_TOKEN_FILE_PATH, tokenFilePath);
-    return configs;
   }
 
   private TempToken renewToken() {

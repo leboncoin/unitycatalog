@@ -1,6 +1,5 @@
 package io.unitycatalog.spark.auth.catalog;
 
-import java.util.HashMap;
 import java.util.Map;
 import org.sparkproject.guava.base.Preconditions;
 
@@ -27,14 +26,5 @@ class FixedUCTokenProvider implements UCTokenProvider {
   @Override
   public String accessToken() {
     return token;
-  }
-
-  @Override
-  public Map<String, String> configs() {
-    // Not Map.of: the 0.2.x connector targets Java 11 but keeps the 0.3.x shape otherwise.
-    Map<String, String> configs = new HashMap<>();
-    configs.put(AuthConfigs.TYPE, AuthConfigs.STATIC_TYPE_VALUE);
-    configs.put(AuthConfigs.STATIC_TOKEN, token);
-    return configs;
   }
 }

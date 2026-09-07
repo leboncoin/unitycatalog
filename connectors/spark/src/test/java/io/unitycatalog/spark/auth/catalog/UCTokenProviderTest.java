@@ -94,29 +94,6 @@ public class UCTokenProviderTest {
         .hasMessageContaining("Configuration key 'oauth.clientSecret' is missing or empty");
   }
 
-  @Test
-  public void configsRoundTripsThroughCreate() {
-    UCTokenProvider provider = UCTokenProvider.create(oidcConfigs());
-
-    // The map a provider hands back must rebuild an equivalent provider: this is what lets the
-    // configuration cross a serialization boundary, e.g. to a Spark executor.
-    UCTokenProvider rebuilt = UCTokenProvider.create(provider.configs());
-
-    assertThat(rebuilt).isInstanceOf(FileOidcUCTokenProvider.class);
-    assertThat(rebuilt.configs()).isEqualTo(provider.configs());
-  }
-
-  @Test
-  public void oidcConfigsCarryNoSecret() {
-    UCTokenProvider provider = UCTokenProvider.create(oidcConfigs());
-
-    assertThat(provider.configs())
-        .containsEntry(AuthConfigs.TYPE, AuthConfigs.OIDC_TYPE_VALUE)
-        .containsEntry(AuthConfigs.OIDC_TOKEN_FILE_PATH, "/var/run/secrets/token")
-        .doesNotContainKey(AuthConfigs.OAUTH_CLIENT_SECRET)
-        .doesNotContainKey(AuthConfigs.STATIC_TOKEN);
-  }
-
   private static Map<String, String> oidcConfigs() {
     Map<String, String> configs = new HashMap<>();
     configs.put(AuthConfigs.TYPE, AuthConfigs.OIDC_TYPE_VALUE);
@@ -134,11 +111,6 @@ public class UCTokenProviderTest {
     @Override
     public String accessToken() {
       return "custom-token";
-    }
-
-    @Override
-    public Map<String, String> configs() {
-      return new HashMap<>();
     }
   }
 }

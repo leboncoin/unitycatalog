@@ -10,7 +10,6 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Supplier;
 import org.sparkproject.guava.base.Preconditions;
@@ -107,16 +106,6 @@ class OAuthUCTokenProvider implements UCTokenProvider {
       }
     }
     return tempToken.token();
-  }
-
-  @Override
-  public Map<String, String> configs() {
-    Map<String, String> configs = new HashMap<>();
-    configs.put(AuthConfigs.TYPE, AuthConfigs.OAUTH_TYPE_VALUE);
-    configs.put(AuthConfigs.OAUTH_URI, oauthUri);
-    configs.put(AuthConfigs.OAUTH_CLIENT_ID, oauthClientId);
-    configs.put(AuthConfigs.OAUTH_CLIENT_SECRET, oauthClientSecret);
-    return configs;
   }
 
   private TempToken renewToken() {
