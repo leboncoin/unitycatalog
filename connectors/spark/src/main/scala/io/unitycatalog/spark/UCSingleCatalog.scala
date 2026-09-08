@@ -3,7 +3,8 @@ package io.unitycatalog.spark
 import io.unitycatalog.client.{ApiClient, ApiException}
 import io.unitycatalog.client.api.{SchemasApi, TablesApi, TemporaryCredentialsApi}
 import io.unitycatalog.client.model.{ColumnInfo, ColumnTypeName, CreateSchema, CreateTable, DataSourceFormat, GenerateTemporaryPathCredential, GenerateTemporaryTableCredential, ListTablesResponse, PathOperation, SchemaInfo, TableOperation, TableType, TemporaryCredentials}
-import io.unitycatalog.spark.auth.catalog.UCTokenProvider
+import io.unitycatalog.spark.auth.AuthConfigUtils
+import io.unitycatalog.spark.auth.catalog.{AuthConfigs, UCTokenProvider}
 
 import java.net.URI
 import java.util
@@ -43,24 +44,13 @@ class UCSingleCatalog extends TableCatalog with SupportsNamespaces with Logging 
       .setHost(url.getHost)
       .setPort(url.getPort)
       .setScheme(url.getScheme)
-    // Backport (0.3.x formalism): resolve auth from options. Supports a static `token`
-    // or the OAuth 2.0 client-credentials keys `oauth.uri`/`oauth.clientId`/`oauth.clientSecret`
-    // (machine-to-machine). The interceptor is dynamic: `accessToken()` is called on every
-    // request, so `OAuthUCTokenProvider` refreshes the token transparently for long sessions.
-    val hasAuthConfig = options.get(UCTokenProvider.TOKEN) != null ||
-      options.get(UCTokenProvider.OAUTH_URI) != null ||
-      options.get(UCTokenProvider.OAUTH_CLIENT_ID) != null ||
-      options.get(UCTokenProvider.OAUTH_CLIENT_SECRET) != null
-    if (hasAuthConfig) {
-      // `options` is a CaseInsensitiveStringMap (keys lowercased), so read each key via `get`
-      // and rebuild a map with the exact keys the factory expects (e.g. `oauth.clientId`).
-      val authOptions = new util.HashMap[String, String]
-      Seq(UCTokenProvider.TOKEN, UCTokenProvider.OAUTH_URI, UCTokenProvider.OAUTH_CLIENT_ID,
-        UCTokenProvider.OAUTH_CLIENT_SECRET).foreach { key =>
-        val value = options.get(key)
-        if (value != null) authOptions.put(key, value)
-      }
-      val tokenProvider = UCTokenProvider.create(authOptions, "")
+    // Backport (0.3.x formalism): `AuthConfigUtils` normalizes the options into a flat, `type`-keyed
+    // map, accepting both the new `auth.*` keys and the legacy un-prefixed ones this connector
+    // shipped. The interceptor is dynamic: `accessToken()` is called on every request, so the
+    // providers refresh the token transparently for long sessions.
+    val authConfigs = AuthConfigUtils.buildAuthConfigs(options.asCaseSensitiveMap())
+    if (authConfigs.containsKey(AuthConfigs.TYPE)) {
+      val tokenProvider = UCTokenProvider.create(authConfigs)
       apiClient = apiClient.setRequestInterceptor { request =>
         request.header("Authorization", "Bearer " + tokenProvider.accessToken())
       }
@@ -72,7 +62,12 @@ class UCSingleCatalog extends TableCatalog with SupportsNamespaces with Logging 
     // where external credential vending is disabled but the caller already has direct storage access.
     skipCredentialVending = java.lang.Boolean.parseBoolean(
       options.getOrDefault("skipCredentialVending", "false"))
-    val proxy = new UCProxy(apiClient, temporaryCredentialsApi, skipCredentialVending)
+    val proxy = new UCProxy(
+      apiClient,
+      temporaryCredentialsApi,
+      skipCredentialVending,
+      urlStr,
+      authConfigs.asScala.toMap)
     proxy.initialize(name, options)
     if (UCSingleCatalog.LOAD_DELTA_CATALOG.get()) {
       try {
@@ -188,12 +183,47 @@ object UCSingleCatalog {
   val LOAD_DELTA_CATALOG = ThreadLocal.withInitial[Boolean](() => true)
   val DELTA_CATALOG_LOADED = ThreadLocal.withInitial[Boolean](() => false)
 
+  /**
+   * What `S3VendedCredentialsProvider` needs to re-request credentials for the same scope: where UC
+   * lives, which table, which operation, and how to authenticate. Carried through the Hadoop
+   * configuration so the executors can renew too, since the driver's provider instance does not
+   * travel with the plan.
+   */
+  case class S3CredentialRenewal(
+      ucUri: String,
+      tableId: String,
+      operation: String,
+      authConfigs: Map[String, String]) {
+
+    def hadoopProps(temporaryCredentials: TemporaryCredentials): Map[String, String] = {
+      val bootstrap = Map(
+        S3VendedCredentialsProvider.INIT_ACCESS_KEY ->
+          temporaryCredentials.getAwsTempCredentials.getAccessKeyId,
+        S3VendedCredentialsProvider.INIT_SECRET_KEY ->
+          temporaryCredentials.getAwsTempCredentials.getSecretAccessKey,
+        S3VendedCredentialsProvider.INIT_SESSION_TOKEN ->
+          temporaryCredentials.getAwsTempCredentials.getSessionToken,
+        S3VendedCredentialsProvider.UC_URI -> ucUri,
+        S3VendedCredentialsProvider.UC_TABLE_ID -> tableId,
+        S3VendedCredentialsProvider.UC_TABLE_OPERATION -> operation,
+        "fs.s3a.aws.credentials.provider" -> classOf[S3VendedCredentialsProvider].getName
+      )
+      // UC omits the expiry only for non-expiring credentials; the provider then never renews.
+      val expiry = Option(temporaryCredentials.getExpirationTime)
+        .map(e => S3VendedCredentialsProvider.INIT_EXPIRATION_TIME -> e.toString)
+      bootstrap ++ expiry ++ authConfigs.map {
+        case (k, v) => (S3VendedCredentialsProvider.UC_AUTH_PREFIX + k) -> v
+      }
+    }
+  }
+
   def generateCredentialProps(
       scheme: String,
-      temporaryCredentials: TemporaryCredentials): Map[String, String] = {
+      temporaryCredentials: TemporaryCredentials,
+      renewal: Option[S3CredentialRenewal] = None): Map[String, String] = {
     if (scheme == "s3") {
       val awsCredentials = temporaryCredentials.getAwsTempCredentials
-      Map(
+      val base = Map(
         // TODO: how to support s3:// properly?
         "fs.s3a.access.key" -> awsCredentials.getAccessKeyId,
         "fs.s3a.secret.key" -> awsCredentials.getSecretAccessKey,
@@ -202,6 +232,10 @@ object UCSingleCatalog {
         "fs.s3.impl.disable.cache" -> "true",
         "fs.s3a.impl.disable.cache" -> "true"
       )
+      // Vended credentials last about an hour, and the keys above are literals frozen into the
+      // plan. Where the table coordinates are known, hand S3A a provider that can re-vend instead,
+      // so a stage outliving them does not fail on S3. Azure and GCS already work this way.
+      renewal.map(base ++ _.hadoopProps(temporaryCredentials)).getOrElse(base)
     } else if (scheme == "gs") {
       val gcsCredentials = temporaryCredentials.getGcpOauthToken
       Map(
@@ -232,7 +266,9 @@ object UCSingleCatalog {
 private class UCProxy(
     apiClient: ApiClient,
     temporaryCredentialsApi: TemporaryCredentialsApi,
-    skipCredentialVending: Boolean) extends TableCatalog with SupportsNamespaces {
+    skipCredentialVending: Boolean,
+    ucUri: String,
+    authConfigs: Map[String, String]) extends TableCatalog with SupportsNamespaces {
   private[this] var name: String = null
   private[this] var tablesApi: TablesApi = null
   private[this] var schemasApi: SchemasApi = null
@@ -300,7 +336,11 @@ private class UCProxy(
             )
         }
       }
-      UCSingleCatalog.generateCredentialProps(uri.getScheme, temporaryCredentials)
+      UCSingleCatalog.generateCredentialProps(
+        uri.getScheme,
+        temporaryCredentials,
+        Some(UCSingleCatalog.S3CredentialRenewal(
+          ucUri, tableId, TableOperation.READ_WRITE.getValue, authConfigs)))
     }
     val sparkTable = CatalogTable(
       identifier,
