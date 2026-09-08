@@ -185,6 +185,11 @@ lazy val client = (project in file("target/clients/java"))
     ),
     (Compile / compile) := ((Compile / compile) dependsOn generate).value,
 
+    // The javadoc tool crashes on the OpenAPI-generated sources (ClientCodeException wrapping a
+    // StringIndexOutOfBoundsException). The jar we consume needs no javadoc, so stop building it.
+    Compile / packageDoc / publishArtifact := false,
+    Compile / doc / sources := Seq.empty,
+
     // OpenAPI generation specs
     openApiInputSpec := (file(".") / "api" / "all.yaml").toString,
     openApiGeneratorName := "java",
