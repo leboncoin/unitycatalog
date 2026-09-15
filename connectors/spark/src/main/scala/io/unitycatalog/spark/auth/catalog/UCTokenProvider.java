@@ -1,62 +1,91 @@
 package io.unitycatalog.spark.auth.catalog;
 
-import static org.sparkproject.guava.base.Preconditions.checkArgument;
-
+import io.unitycatalog.spark.auth.AuthConfigUtils;
 import java.util.Map;
+import org.sparkproject.guava.base.Preconditions;
 
 /**
  * Interface for providing access tokens to authenticate with Unity Catalog.
  *
  * <p>Implementations:
+ *
  * <ul>
- *   <li>{@link FixedUCTokenProvider} - uses a pre-configured static token</li>
- *   <li>{@link OAuthUCTokenProvider} - obtains tokens via OAuth 2.0 client credentials flow</li>
+ *   <li>{@link FixedUCTokenProvider} - uses a pre-configured static token
+ *   <li>{@link OAuthUCTokenProvider} - obtains tokens via OAuth 2.0 client credentials flow
+ *   <li>{@link FileOidcUCTokenProvider} - exchanges an OIDC token read from a file (workload
+ *       identity federation), so no secret is stored
  * </ul>
  *
- * <p>Backport of the 0.3.x {@code UCTokenProvider} to the 0.2.x connector: same option
- * formalism ({@code token} or {@code oauth.uri}/{@code oauth.clientId}/{@code oauth.clientSecret}),
- * but the OAuth implementation relies only on the JDK HTTP client available in 0.2.x.
+ * <p>Backport of the 0.3.x {@code TokenProvider} to the 0.2.x connector, including the {@code
+ * type}-based dispatch. The OAuth implementation relies only on the JDK HTTP client available in
+ * 0.2.x, as {@code RetryingApiClient} does not exist here.
+ *
+ * <p>The 0.3.x {@code configs()} accessor is deliberately left out: it exists there so an executor
+ * can rebuild a provider from the Hadoop configuration and renew vended credentials, which the
+ * 0.2.x connector never does. Everything here runs on the driver.
  */
 public interface UCTokenProvider {
 
-  String OAUTH_URI = "oauth.uri";
-  String OAUTH_CLIENT_ID = "oauth.clientId";
-  String OAUTH_CLIENT_SECRET = "oauth.clientSecret";
-  String TOKEN = "token";
+  /**
+   * Initializes the token provider with configuration parameters.
+   *
+   * @param configs configuration map with authentication settings, keys without prefix
+   * @throws IllegalArgumentException if required parameters are missing or invalid
+   */
+  void initialize(Map<String, String> configs);
 
   /** Returns the access token for Unity Catalog authentication, refreshing it when needed. */
   String accessToken();
 
   /**
-   * Creates a token provider from catalog options (keys without prefix). Returns a
-   * {@link FixedUCTokenProvider} when {@code token} is set, otherwise an
-   * {@link OAuthUCTokenProvider} when the three {@code oauth.*} keys are set.
+   * Creates a token provider from a configuration map.
    *
-   * @param optionKeyPrefix prefix prepended to option keys in error messages, e.g.
-   *                        {@code "spark.sql.catalog.<catalogName>."}
-   * @throws IllegalArgumentException if no complete authentication configuration is found
+   * <p>Dispatches on the required {@code type} key: {@code static}, {@code oauth}, {@code oidc}, or
+   * the fully qualified class name of a custom {@link UCTokenProvider} implementation. Legacy
+   * option shapes are normalized to a {@code type} upstream by {@link AuthConfigUtils}.
+   *
+   * @throws IllegalArgumentException if {@code type} is missing, or if the parameters required by
+   *     the selected type are missing or invalid
+   * @throws RuntimeException if a custom provider class cannot be instantiated
    */
-  static UCTokenProvider create(Map<String, String> options, String optionKeyPrefix) {
-    String token = options.get(TOKEN);
-    if (token != null && !token.isEmpty()) {
-      return new FixedUCTokenProvider(token);
+  static UCTokenProvider create(Map<String, String> configs) {
+    String authType = configs.get(AuthConfigs.TYPE);
+    Preconditions.checkArgument(
+        authType != null && !authType.trim().isEmpty(),
+        "Required configuration key '%s' is missing or empty. "
+            + "Must be 'static', 'oauth', 'oidc', or a fully qualified UCTokenProvider class name.",
+        AuthConfigs.TYPE);
+
+    UCTokenProvider tokenProvider;
+    switch (authType) {
+      case AuthConfigs.STATIC_TYPE_VALUE:
+        tokenProvider = new FixedUCTokenProvider();
+        break;
+
+      case AuthConfigs.OAUTH_TYPE_VALUE:
+        tokenProvider = new OAuthUCTokenProvider();
+        break;
+
+      case AuthConfigs.OIDC_TYPE_VALUE:
+        tokenProvider = new FileOidcUCTokenProvider();
+        break;
+
+      default:
+        try {
+          tokenProvider =
+              (UCTokenProvider) Class.forName(authType).getDeclaredConstructor().newInstance();
+        } catch (Exception e) {
+          throw new RuntimeException(
+              String.format(
+                  "Failed to instantiate custom UCTokenProvider '%s'. Ensure the class exists, "
+                      + "implements UCTokenProvider, and has a public no-arg constructor.",
+                  authType),
+              e);
+        }
+        break;
     }
 
-    String oauthUri = options.get(OAUTH_URI);
-    String oauthClientId = options.get(OAUTH_CLIENT_ID);
-    String oauthClientSecret = options.get(OAUTH_CLIENT_SECRET);
-    if (oauthUri != null || oauthClientId != null || oauthClientSecret != null) {
-      checkArgument(oauthUri != null && oauthClientId != null && oauthClientSecret != null,
-          "Incomplete OAuth configuration detected. All of the keys are required: "
-              + "%soauth.uri, %soauth.clientId, %soauth.clientSecret. Please ensure they are "
-              + "all set.", optionKeyPrefix, optionKeyPrefix, optionKeyPrefix);
-      return new OAuthUCTokenProvider(oauthUri, oauthClientId, oauthClientSecret);
-    }
-
-    throw new IllegalArgumentException(String.format("Cannot determine UC authentication "
-            + "configuration from options, please set %stoken for static token authentication or "
-            + "%soauth.uri, %soauth.clientId, %soauth.clientSecret for OAuth 2.0 authentication "
-            + "(all three required)",
-        optionKeyPrefix, optionKeyPrefix, optionKeyPrefix, optionKeyPrefix));
+    tokenProvider.initialize(configs);
+    return tokenProvider;
   }
 }

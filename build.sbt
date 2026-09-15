@@ -185,6 +185,11 @@ lazy val client = (project in file("target/clients/java"))
     ),
     (Compile / compile) := ((Compile / compile) dependsOn generate).value,
 
+    // The javadoc tool crashes on the OpenAPI-generated sources (ClientCodeException wrapping a
+    // StringIndexOutOfBoundsException). The jar we consume needs no javadoc, so stop building it.
+    Compile / packageDoc / publishArtifact := false,
+    Compile / doc / sources := Seq.empty,
+
     // OpenAPI generation specs
     openApiInputSpec := (file(".") / "api" / "all.yaml").toString,
     openApiGeneratorName := "java",
@@ -556,6 +561,9 @@ lazy val spark = (project in file("connectors/spark"))
       "org.antlr" % "antlr4" % "4.9.3",
       "com.google.cloud.bigdataoss" % "util-hadoop" % "3.0.2" % Provided,
       "org.apache.hadoop" % "hadoop-azure" % "3.4.0" % Provided,
+      // S3VendedCredentialsProvider implements the SDK v2 AwsCredentialsProvider. Provided, like
+      // the GCS and ABFS SPIs above: hadoop-aws ships the SDK on the runtime classpath.
+      "software.amazon.awssdk" % "auth" % "2.24.0" % Provided,
     ),
     libraryDependencies ++= Seq(
       // Test dependencies

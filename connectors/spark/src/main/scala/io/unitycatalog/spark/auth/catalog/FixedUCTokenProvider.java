@@ -1,13 +1,25 @@
 package io.unitycatalog.spark.auth.catalog;
 
+import java.util.Map;
 import org.sparkproject.guava.base.Preconditions;
 
-/** A {@link UCTokenProvider} that always returns a pre-configured static token. */
-public class FixedUCTokenProvider implements UCTokenProvider {
-  private final String token;
+/**
+ * Internal class - not intended for direct use.
+ *
+ * <p>A {@link UCTokenProvider} that always returns a pre-configured static token.
+ */
+class FixedUCTokenProvider implements UCTokenProvider {
+  private String token;
 
-  public FixedUCTokenProvider(String token) {
-    Preconditions.checkNotNull(token, "Token must not be null");
+  FixedUCTokenProvider() {}
+
+  @Override
+  public void initialize(Map<String, String> configs) {
+    String token = configs.get(AuthConfigs.STATIC_TOKEN);
+    Preconditions.checkArgument(
+        token != null && !token.isEmpty(),
+        "Configuration key '%s' is missing or empty",
+        AuthConfigs.STATIC_TOKEN);
     this.token = token;
   }
 
